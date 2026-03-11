@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AgentGate - Dashboard</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-brand">AgentGate</div>
+        <div class="nav-user">
+            {% if user.picture %}
+            <img src="{{ user.picture }}" alt="avatar" class="avatar">
+            {% endif %}
+            <span>{{ user.name }}</span>
+            <a href="/logout" class="btn btn-sm">Logout</a>
+        </div>
+    </nav>
+
+    <div class="container">
+        <!-- Connected Services -->
+        <section class="section">
+            <h2>Connected Services</h2>
+            <div class="services-grid">
+                {% for key, svc in available_services.items() %}
+                <div class="service-card {% if key in connected_services|map(attribute='service')|list %}connected{% endif %}">
+                    <div class="service-header">
+                        <span class="service-icon">{{ svc.icon }}</span>
+                        <h3>{{ svc.display_name }}</h3>
+                    </div>
+                    <p>{{ svc.description }}</p>
+                    <div class="service-scopes">
+                        {% for scope in svc.scopes[:3] %}
+                        <span class="scope-badge">{{ scope }}</span>
+                        {% endfor %}
+                        {% if svc.scopes|length > 3 %}
+                        <span class="scope-badge more">+{{ svc.scopes|length - 3 }} more</span>
+                        {% endif %}
+                    </div>
+                    {% set connected_list = connected_services|map(attribute='service')|list %}
+                    {% if key in connected_list %}
+                    <button class="btn btn-danger btn-sm" onclick="disconnectService('{{ key }}')">Disconnect</button>
+                    {% else %}
+                    <form method="post" action="/connect/{{ key }}">
+                        <button type="submit" class="btn btn-primary btn-sm">Connect</button>
+                    </form>
+                    {% endif %}
+                </div>
+                {% endfor %}
+            </div>
+        </section>
+
+        <!-- Agent Policies -->
+        <section class="section">
+            <h2>Agent Policies</h2>
+            <button class="btn btn-primary" onclick="showCreatePolicy()">+ New Agent Policy</button>
+            <div class="policies-list">
+                {% if agent_policies %}
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Agent</th>
+                            <th>Services</th>
+                            <th>Rate Limit</th>
+                            <th>Status</th>
+                            <th>Actions</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for policy in agent_policies %}
+                        <tr>
+                            <td><strong>{{ policy.agent_name }}</strong><br><small>{{ policy.agent_id }}</small></td>
+                            <td>{{ policy.allowed_services|join(', ') }}</td>
+                            <td>{{ policy.rate_limit_per_minute }}/min</td>
+                            <td>
+                                {% if policy.is_active %}
+                                <span class="badge badge-success">Active</span>
+                                {% else %}
+                                <span class="badge badge-danger">Disabled</span>
+                                {% endif %}
+                            </td>
+                            <td>
+                                <button class="btn btn-sm" onclick="togglePolicy('{{ policy.agent_id }}')">
+                                    {{ 'Disable' if policy.is_active else 'Enable' }}
+                                </button>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <p class="empty-state">No agent policies yet. Create one to control how agents access your services.</p>
+                {% endif %}
+            </div>
+        </section>
+
+        <!-- API Key Management -->
+        <section class="section">
+            <h2>API Keys</h2>
+            <button class="btn btn-primary" onclick="showCreateKey()">+ New API Key</button>
+            <div id="new-key-banner" class="new-key-banner" style="display: none;">
+                <p><strong>Save this key now. It will not be shown again.</strong></p>
+                <code id="new-key-value"></code>
+                <button class="btn btn-sm" onclick="copyKey()">Copy</button>
+                <button class="btn btn-sm" onclick="document.getElementById('new-key-banner').style.display='none'">Dismiss</button>
+            </div>
+            <div id="api-keys-list">
+                <p class="empty-state">Loading API keys...</p>
+            </div>
+        </section>
+
+        <!-- Recent Activity -->
+        <section class="section">
+            <h2>Recent Activity</h2>
+            <a href="/audit" class="btn btn-sm">View Full Audit Trail</a>
+            <div class="audit-list">
+                {% if audit_entries %}
+                <table class="table">
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Agent</th>
+                            <th>Service</th>
+                            <th>Action</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for entry in audit_entries %}
+                        <tr>
+                            <td><small class="timestamp" data-ts="{{ entry.timestamp }}">{{ entry.timestamp }}</small></td>
+                            <td>{{ entry.agent_id }}</td>
+                            <td>{{ entry.service }}</td>
+                            <td>{{ entry.action }}</td>
+                            <td>
+                                <span class="badge badge-{{ 'success' if entry.status == 'success' else 'danger' if entry.status == 'denied' else 'warning' }}">
+                                    {{ entry.status }}
+                                </span>
+                            </td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+                {% else %}
+                <p class="empty-state">No activity yet. Token requests from agents will appear here.</p>
+                {% endif %}
+            </div>
+        </section>
+    </div>
+
+    <!-- Create Policy Modal -->
+    <div id="policy-modal" class="modal" style="display: none;">
+        <div class="modal-backdrop" onclick="closePolicyModal()"></div>
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Create Agent Policy</h3>
+                <button class="btn btn-sm" onclick="closePolicyModal()">&times;</button>
+            </div>
+            <form id="policy-form" onsubmit="submitPolicy(event)">
+                <div class="form-group">
+                    <label for="policy-agent-id">Agent ID</label>
+                    <input type="text" id="policy-agent-id" placeholder="my-code-review-bot" required>
+                    <small>A unique identifier for this agent (lowercase, hyphens allowed).</small>
+                </div>
+                <div class="form-group">
+                    <label for="policy-agent-name">Agent Display Name</label>
+                    <input type="text" id="policy-agent-name" placeholder="Code Review Bot" required>
+                </div>
+                <div class="form-group">
+                    <label>Allowed Services &amp; Scopes</label>
+                    <div id="service-checkboxes">
+                        {% for key, svc in available_services.items() %}
+                        <div class="service-checkbox-group">
+                            <label class="checkbox-label">
+                                <input type="checkbox" name="services" value="{{ key }}"
+                                       onchange="toggleServiceScopes('{{ key }}', this.checked)">
+                                {{ svc.display_name }}
+                            </label>
+                            <div id="scopes-{{ key }}" class="scope-checkboxes" style="display: none;">
+                                {% for scope in svc.scopes %}
+                                <label class="checkbox-label scope-label">
+                                    <input type="checkbox" name="scope-{{ key }}" value="{{ scope }}">
+                                    {{ scope }}
+                                </label>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        {% endfor %}
+                    </div>
+                </div>
+                <div class="form-group">
+                    <label for="policy-rate-limit">Rate Limit (requests/min)</label>
+                    <input type="number" id="policy-rate-limit" value="60" min="1" max="1000">
+                </div>
+                <div class="form-group">
+                    <label>Require Step-Up Auth for:</label>
+                    <div id="step-up-checkboxes">
+                        {% for key, svc in available_services.items() %}
+                        <label class="checkbox-label">
+                            <input type="checkbox" name="step-up" value="{{ key }}">
+                            {{ svc.display_name }}
+                        </label>
+                        {% endfor %}
+                    </div>
+                </div>
+                <div id="policy-error" class="form-error" style="display: none;"></div>
+                <div class="modal-actions">
+                    <button type="button" class="btn" onclick="closePolicyModal()">Cancel</button>
+                    <button type="submit" class="btn btn-primary" id="policy-submit-btn">Create Policy</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <!-- Create API Key Modal -->
+    <div id="key-modal" class="modal" style="display: none;">
+        <div class="modal-backdrop" onclick="closeKeyModal()"></div>
+        <div class="modal-content">
+            <div class="modal-header">
+                <h3>Create API Key</h3>
+                <button class="btn btn-sm" onclick="closeKeyModal()">&times;</button>
+            </div>
+            <form id="key-form" onsubmit="submitKey(event)">
+                <div class="form-group">
+                    <label for="key-agent-id">Agent ID</label>
+                    <input type="text" id="key-agent-id" placeholder="my-code-review-bot" required>
+                    <small>Must match an existing agent policy.</small>
+                </div>
+                <div class="form-group">
+                    <label for="key-name">Key Name</label>
+                    <input type="text" id="key-name" placeholder="production-key" value="default">
+                </div>
+                <div class="form-group">
+                    <label for="key-expires">Expires In (seconds, 0 = never)</label>
+                    <input type="number" id="key-expires" value="0" min="0">
+                    <small>Recommended: 86400 (24h), 604800 (7d), 2592000 (30d), or 0 for no expiry.</small>
+                </div>
+                <div id="key-error" class="form-error" style="display: none;"></div>
+                <div class="modal-actions">
+                    <button type="button" class="btn" onclick="closeKeyModal()">Cancel</button>
+                    <button type="submit" class="btn btn-primary" id="key-submit-btn">Create Key</button>
+                </div>
+            </form>
+        </div>
+    </div>
+
+    <script>
+    // --- Timestamp Formatting ---
+    function formatTimestamps() {
+        document.querySelectorAll('.timestamp[data-ts]').forEach(el => {
+            const ts = parseFloat(el.dataset.ts);
+            if (!isNaN(ts) && ts > 0) {
+                const date = new Date(ts * 1000);
+                el.textContent = date.toLocaleString();
+            }
+        });
+    }
+    formatTimestamps();
+
+    // --- Service Disconnection ---
+    async function disconnectService(service) {
+        if (!confirm(`Disconnect ${service}? All agents using this service will lose access.`)) return;
+        const resp = await fetch(`/connect/${service}`, { method: 'DELETE' });
+        if (resp.ok) location.reload();
+    }
+
+    // --- Policy Modal ---
+    function showCreatePolicy() {
+        document.getElementById('policy-modal').style.display = 'flex';
+        document.getElementById('policy-error').style.display = 'none';
+    }
+
+    function closePolicyModal() {
+        document.getElementById('policy-modal').style.display = 'none';
+        document.getElementById('policy-form').reset();
+        // Hide all scope checkboxes
+        document.querySelectorAll('.scope-checkboxes').forEach(el => el.style.display = 'none');
+    }
+
+    function toggleServiceScopes(service, checked) {
+        document.getElementById('scopes-' + service).style.display = checked ? 'block' : 'none';
+        if (checked) {
+            // Auto-select all scopes when a service is checked
+            document.querySelectorAll(`input[name="scope-${service}"]`).forEach(cb => cb.checked = true);
+        }
+    }
+
+    async function submitPolicy(event) {
+        event.preventDefault();
+        const errorEl = document.getElementById('policy-error');
+        const submitBtn = document.getElementById('policy-submit-btn');
+        errorEl.style.display = 'none';
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Creating...';
+
+        const agentId = document.getElementById('policy-agent-id').value.trim();
+        const agentName = document.getElementById('policy-agent-name').value.trim();
+        const rateLimit = parseInt(document.getElementById('policy-rate-limit').value) || 60;
+
+        // Gather selected services and scopes
+        const allowedServices = [];
+        const allowedScopes = {};
+        document.querySelectorAll('input[name="services"]:checked').forEach(cb => {
+            const svc = cb.value;
+            allowedServices.push(svc);
+            const scopes = [];
+            document.querySelectorAll(`input[name="scope-${svc}"]:checked`).forEach(s => {
+                scopes.push(s.value);
+            });
+            allowedScopes[svc] = scopes;
+        });
+
+        // Gather step-up services
+        const requiresStepUp = [];
+        document.querySelectorAll('input[name="step-up"]:checked').forEach(cb => {
+            requiresStepUp.push(cb.value);
+        });
+
+        if (!agentId || !agentName) {
+            errorEl.textContent = 'Agent ID and name are required.';
+            errorEl.style.display = 'block';
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Create Policy';
+            return;
+        }
+
+        if (allowedServices.length === 0) {
+            errorEl.textContent = 'Select at least one service.';
+            errorEl.style.display = 'block';
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Create Policy';
+            return;
+        }
+
+        try {
+            const resp = await fetch('/api/v1/policies', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    agent_id: agentId,
+                    agent_name: agentName,
+                    allowed_services: allowedServices,
+                    allowed_scopes: allowedScopes,
+                    rate_limit_per_minute: rateLimit,
+                    requires_step_up: requiresStepUp,
+                }),
+            });
+
+            if (!resp.ok) {
+                const err = await resp.json();
+                throw new Error(err.detail || 'Failed to create policy');
+            }
+
+            closePolicyModal();
+            location.reload();
+        } catch (err) {
+            errorEl.textContent = err.message;
+            errorEl.style.display = 'block';
+        } finally {
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Create Policy';
+        }
+    }
+
+    // --- Policy Toggle ---
+    async function togglePolicy(agentId) {
+        const resp = await fetch(`/api/v1/policies/${agentId}/toggle`, { method: 'POST' });
+        if (resp.ok) location.reload();
+    }
+
+    // --- API Key Management ---
+    function showCreateKey() {
+        document.getElementById('key-modal').style.display = 'flex';
+        document.getElementById('key-error').style.display = 'none';
+    }
+
+    function closeKeyModal() {
+        document.getElementById('key-modal').style.display = 'none';
+        document.getElementById('key-form').reset();
+    }
+
+    async function submitKey(event) {
+        event.preventDefault();
+        const errorEl = document.getElementById('key-error');
+        const submitBtn = document.getElementById('key-submit-btn');
+        errorEl.style.display = 'none';
+        submitBtn.disabled = true;
+        submitBtn.textContent = 'Creating...';
+
+        const agentId = document.getElementById('key-agent-id').value.trim();
+        const name = document.getElementById('key-name').value.trim() || 'default';
+        const expiresIn = parseInt(document.getElementById('key-expires').value) || 0;
+
+        if (!agentId) {
+            errorEl.textContent = 'Agent ID is required.';
+            errorEl.style.display = 'block';
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Create Key';
+            return;
+        }
+
+        try {
+            const resp = await fetch('/api/v1/keys', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    agent_id: agentId,
+                    name: name,
+                    expires_in: expiresIn,
+                }),
+            });
+
+            if (!resp.ok) {
+                const err = await resp.json();
+                throw new Error(err.detail || 'Failed to create API key');
+            }
+
+            const data = await resp.json();
+            closeKeyModal();
+
+            // Show the new key banner
+            document.getElementById('new-key-value').textContent = data.key;
+            document.getElementById('new-key-banner').style.display = 'block';
+
+            // Refresh the key list
+            loadApiKeys();
+        } catch (err) {
+            errorEl.textContent = err.message;
+            errorEl.style.display = 'block';
+        } finally {
+            submitBtn.disabled = false;
+            submitBtn.textContent = 'Create Key';
+        }
+    }
+
+    function copyKey() {
+        const keyValue = document.getElementById('new-key-value').textContent;
+        navigator.clipboard.writeText(keyValue).then(() => {
+            const btn = event.target;
+            btn.textContent = 'Copied!';
+            setTimeout(() => btn.textContent = 'Copy', 2000);
+        });
+    }
+
+    async function revokeKey(keyId) {
+        if (!confirm('Revoke this API key? Agents using it will lose access immediately.')) return;
+        const resp = await fetch(`/api/v1/keys/${keyId}`, { method: 'DELETE' });
+        if (resp.ok) loadApiKeys();
+    }
+
+    function formatTs(ts) {
+        if (!ts || ts === 0) return 'Never';
+        return new Date(ts * 1000).toLocaleString();
+    }
+
+    async function loadApiKeys() {
+        const container = document.getElementById('api-keys-list');
+        try {
+            const resp = await fetch('/api/v1/keys');
+            if (!resp.ok) {
+                container.innerHTML = '<p class="empty-state">Failed to load API keys.</p>';
+                return;
+            }
+            const keys = await resp.json();
+
+            if (keys.length === 0) {
+                container.innerHTML = '<p class="empty-state">No API keys yet. Create one to let agents authenticate programmatically.</p>';
+                return;
+            }
+
+            let html = '<table class="table"><thead><tr>';
+            html += '<th>Prefix</th><th>Name</th><th>Agent</th><th>Created</th><th>Expires</th><th>Last Used</th><th>Status</th><th>Actions</th>';
+            html += '</tr></thead><tbody>';
+
+            for (const k of keys) {
+                const status = k.is_revoked
+                    ? '<span class="badge badge-danger">Revoked</span>'
+                    : (k.expires_at && Date.now() / 1000 > k.expires_at)
+                        ? '<span class="badge badge-warning">Expired</span>'
+                        : '<span class="badge badge-success">Active</span>';
+
+                html += '<tr>';
+                html += `<td><code>${k.key_prefix}...</code></td>`;
+                html += `<td>${k.name}</td>`;
+                html += `<td>${k.agent_id}</td>`;
+                html += `<td><small>${formatTs(k.created_at)}</small></td>`;
+                html += `<td><small>${k.expires_at ? formatTs(k.expires_at) : 'Never'}</small></td>`;
+                html += `<td><small>${formatTs(k.last_used_at)}</small></td>`;
+                html += `<td>${status}</td>`;
+                html += `<td>${!k.is_revoked ? `<button class="btn btn-danger btn-sm" onclick="revokeKey('${k.key_id}')">Revoke</button>` : ''}</td>`;
+                html += '</tr>';
+            }
+
+            html += '</tbody></table>';
+            container.innerHTML = html;
+        } catch (err) {
+            container.innerHTML = '<p class="empty-state">Error loading API keys.</p>';
+        }
+    }
+
+    // Load API keys on page load
+    loadApiKeys();
+    </script>
+</body>
+</html>

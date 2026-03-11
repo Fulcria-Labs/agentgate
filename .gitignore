@@ -1,0 +1,40 @@
+# Virtual environments
+venv/
+venv_test/
+.venv/
+env/
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# Distribution / packaging
+*.egg-info/
+*.egg
+dist/
+build/
+
+# Environment files
+.env
+
+# Database
+*.db
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
+test_*.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
