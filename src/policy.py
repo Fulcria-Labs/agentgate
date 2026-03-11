@@ -1,7 +1,9 @@
 """Policy engine for enforcing agent access controls."""
 
+import ipaddress
 import time
 from collections import defaultdict
+from datetime import datetime, timezone
 
 from .database import AgentPolicy, get_agent_policy, log_audit
 
@@ -18,6 +20,62 @@ class PolicyDenied(Exception):
         super().__init__(reason)
 
 
+def check_time_window(policy: AgentPolicy, now: datetime | None = None) -> str | None:
+    """Check if the current time falls within the policy's allowed time window.
+
+    Returns None if access is allowed, or a denial reason string if denied.
+    """
+    if now is None:
+        now = datetime.now(timezone.utc)
+
+    # Check allowed days (0=Monday .. 6=Sunday)
+    if policy.allowed_days:
+        current_day = now.weekday()
+        if current_day not in policy.allowed_days:
+            day_names = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+            allowed = ", ".join(day_names[d] for d in sorted(policy.allowed_days))
+            return f"Access denied: not within allowed days ({allowed})"
+
+    # Check allowed hours (0-23 UTC)
+    if policy.allowed_hours:
+        current_hour = now.hour
+        if current_hour not in policy.allowed_hours:
+            return (
+                f"Access denied: not within allowed hours "
+                f"({min(policy.allowed_hours):02d}:00-{max(policy.allowed_hours):02d}:59 UTC)"
+            )
+
+    return None
+
+
+def check_ip_allowlist(policy: AgentPolicy, ip_address: str) -> str | None:
+    """Check if the requesting IP is in the policy's allowlist.
+
+    Supports both exact IPs and CIDR notation (e.g., '192.168.1.0/24').
+    Returns None if access is allowed, or a denial reason string if denied.
+    """
+    if not policy.ip_allowlist:
+        return None  # Empty = allow all
+
+    try:
+        addr = ipaddress.ip_address(ip_address)
+    except ValueError:
+        return f"Access denied: invalid IP address '{ip_address}'"
+
+    for entry in policy.ip_allowlist:
+        try:
+            if "/" in entry:
+                if addr in ipaddress.ip_network(entry, strict=False):
+                    return None
+            else:
+                if addr == ipaddress.ip_address(entry):
+                    return None
+        except ValueError:
+            continue  # Skip malformed entries
+
+    return f"Access denied: IP {ip_address} not in allowlist"
+
+
 async def enforce_policy(
     user_id: str,
     agent_id: str,
@@ -28,6 +86,16 @@ async def enforce_policy(
     """Check all policy constraints before issuing a token.
 
     Returns the policy if all checks pass, raises PolicyDenied otherwise.
+
+    Enforces (in order):
+      1. Agent existence and active status
+      2. Policy ownership (user must own the policy)
+      3. Policy expiration
+      4. Time-based access windows (allowed hours/days)
+      5. IP allowlist
+      6. Service authorization
+      7. Scope restrictions
+      8. Rate limiting
     """
     policy = await get_agent_policy(agent_id)
 
@@ -42,7 +110,38 @@ async def enforce_policy(
                        details="Agent is disabled")
         raise PolicyDenied("Agent is disabled", agent_id, service)
 
-    # 2. Service must be in the allowed list
+    # 2. Policy ownership: requesting user must be the policy creator
+    if policy.created_by != user_id:
+        await log_audit(user_id, agent_id, service, "token_request", "denied",
+                       details=f"Ownership violation: user '{user_id}' is not policy owner",
+                       ip_address=ip_address)
+        raise PolicyDenied(
+            "Not authorized: you do not own this agent's policy",
+            agent_id, service,
+        )
+
+    # 3. Policy expiration check
+    now = time.time()
+    if policy.expires_at > 0 and now > policy.expires_at:
+        await log_audit(user_id, agent_id, service, "token_request", "denied",
+                       details="Policy has expired")
+        raise PolicyDenied("Agent policy has expired", agent_id, service)
+
+    # 4. Time-based access window check
+    time_denial = check_time_window(policy)
+    if time_denial:
+        await log_audit(user_id, agent_id, service, "token_request", "denied",
+                       details=time_denial, ip_address=ip_address)
+        raise PolicyDenied(time_denial, agent_id, service)
+
+    # 5. IP allowlist check
+    ip_denial = check_ip_allowlist(policy, ip_address)
+    if ip_denial:
+        await log_audit(user_id, agent_id, service, "token_request", "denied",
+                       details=ip_denial, ip_address=ip_address)
+        raise PolicyDenied(ip_denial, agent_id, service)
+
+    # 6. Service must be in the allowed list
     if service not in policy.allowed_services:
         await log_audit(user_id, agent_id, service, "token_request", "denied",
                        details=f"Service '{service}' not in allowed list: {policy.allowed_services}")
@@ -51,7 +150,7 @@ async def enforce_policy(
             agent_id, service,
         )
 
-    # 3. Requested scopes must be within allowed scopes
+    # 7. Requested scopes must be within allowed scopes
     allowed = set(policy.allowed_scopes.get(service, []))
     requested = set(requested_scopes)
     excess = requested - allowed
@@ -64,8 +163,7 @@ async def enforce_policy(
             agent_id, service,
         )
 
-    # 4. Rate limit check
-    now = time.time()
+    # 8. Rate limit check
     window_start = now - 60
     key = f"{agent_id}:{service}"
     _rate_counters[key] = [t for t in _rate_counters[key] if t > window_start]
@@ -78,7 +176,7 @@ async def enforce_policy(
         )
     _rate_counters[key].append(now)
 
-    # 5. Step-up auth check (returns policy, caller handles CIBA flow)
+    # 9. Step-up auth check (returns policy, caller handles CIBA flow)
     # This is checked but not enforced here - the caller must handle it
     # by calling trigger_step_up_auth if the service requires it
 

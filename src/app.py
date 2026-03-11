@@ -24,6 +24,8 @@ from .database import (
     add_connected_service,
     create_agent_policy,
     create_api_key,
+    delete_agent_policy,
+    emergency_revoke_all,
     get_all_policies,
     get_api_keys,
     get_audit_log,
@@ -200,6 +202,10 @@ class CreatePolicyRequest(BaseModel):
     allowed_scopes: dict[str, list[str]]
     rate_limit_per_minute: int = 60
     requires_step_up: list[str] = []
+    allowed_hours: list[int] = []   # 0-23 UTC, empty = always allowed
+    allowed_days: list[int] = []    # 0=Mon..6=Sun, empty = always allowed
+    expires_at: float = 0.0         # Unix timestamp, 0 = never
+    ip_allowlist: list[str] = []    # CIDR or IP, empty = allow all
 
 
 @app.post("/api/v1/policies")
@@ -224,6 +230,23 @@ async def create_policy(body: CreatePolicyRequest, request: Request):
                 detail=f"Invalid scopes for {svc}: {', '.join(invalid)}",
             )
 
+    # Validate time window constraints
+    if body.allowed_hours:
+        invalid_hours = [h for h in body.allowed_hours if h < 0 or h > 23]
+        if invalid_hours:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid hours (must be 0-23): {invalid_hours}",
+            )
+
+    if body.allowed_days:
+        invalid_days = [d for d in body.allowed_days if d < 0 or d > 6]
+        if invalid_days:
+            raise HTTPException(
+                status_code=400,
+                detail=f"Invalid days (must be 0=Mon..6=Sun): {invalid_days}",
+            )
+
     policy = AgentPolicy(
         agent_id=body.agent_id,
         agent_name=body.agent_name,
@@ -231,6 +254,10 @@ async def create_policy(body: CreatePolicyRequest, request: Request):
         allowed_scopes=body.allowed_scopes,
         rate_limit_per_minute=body.rate_limit_per_minute,
         requires_step_up=body.requires_step_up,
+        allowed_hours=body.allowed_hours,
+        allowed_days=body.allowed_days,
+        expires_at=body.expires_at,
+        ip_allowlist=body.ip_allowlist,
         created_by=user["sub"],
         created_at=time.time(),
     )
@@ -252,6 +279,10 @@ async def list_policies(request: Request):
             "allowed_services": p.allowed_services,
             "rate_limit_per_minute": p.rate_limit_per_minute,
             "is_active": p.is_active,
+            "allowed_hours": p.allowed_hours,
+            "allowed_days": p.allowed_days,
+            "expires_at": p.expires_at or None,
+            "ip_allowlist": p.ip_allowlist,
         }
         for p in policies
     ]
@@ -474,6 +505,47 @@ async def toggle_policy(agent_id: str, request: Request):
     status = "enabled" if new_state else "disabled"
     await log_audit(user["sub"], agent_id, "", f"agent_{status}", "success")
     return {"agent_id": agent_id, "is_active": new_state, "status": status}
+
+
+# --- Policy Deletion ---
+
+@app.delete("/api/v1/policies/{agent_id}")
+async def delete_policy(agent_id: str, request: Request):
+    """Permanently delete an agent policy and log the action."""
+    user = require_user(request)
+    deleted = await delete_agent_policy(agent_id, user["sub"])
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Agent policy not found")
+    await log_audit(user["sub"], agent_id, "", "policy_deleted", "success")
+    return {"status": "deleted", "agent_id": agent_id}
+
+
+# --- Emergency Kill Switch ---
+
+@app.post("/api/v1/emergency-revoke")
+async def emergency_revoke(request: Request):
+    """Emergency kill switch: instantly disable ALL agent policies and revoke ALL API keys.
+
+    This is an irreversible safety mechanism. Use when you suspect an agent is
+    compromised or behaving unexpectedly. All agents will immediately lose access
+    and all API keys will be invalidated.
+    """
+    user = require_user(request)
+    ip = request.client.host if request.client else ""
+    result = await emergency_revoke_all(user["sub"])
+    await log_audit(
+        user["sub"], "*", "", "emergency_revoke", "success",
+        ip_address=ip,
+        details=f"Disabled {result['policies_disabled']} policies, "
+                f"revoked {result['keys_revoked']} API keys",
+    )
+    return {
+        "status": "all_access_revoked",
+        "policies_disabled": result["policies_disabled"],
+        "keys_revoked": result["keys_revoked"],
+        "message": "All agent access has been immediately revoked. "
+                   "Re-enable individual agents via policy toggle.",
+    }
 
 
 # --- Health ---

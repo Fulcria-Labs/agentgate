@@ -38,6 +38,11 @@ class AgentPolicy:
     created_by: str = ""
     created_at: float = 0.0
     is_active: bool = True
+    # Time-based access windows (empty = always allowed)
+    allowed_hours: list[int] = field(default_factory=list)  # 0-23, e.g. [9,10,...,17]
+    allowed_days: list[int] = field(default_factory=list)    # 0=Mon..6=Sun, e.g. [0,1,2,3,4]
+    expires_at: float = 0.0  # 0 = never expires
+    ip_allowlist: list[str] = field(default_factory=list)  # Empty = allow all
 
 
 @dataclass
@@ -68,7 +73,11 @@ async def init_db():
                 requires_step_up TEXT NOT NULL DEFAULT '[]',
                 created_by TEXT NOT NULL,
                 created_at REAL NOT NULL,
-                is_active INTEGER NOT NULL DEFAULT 1
+                is_active INTEGER NOT NULL DEFAULT 1,
+                allowed_hours TEXT NOT NULL DEFAULT '[]',
+                allowed_days TEXT NOT NULL DEFAULT '[]',
+                expires_at REAL NOT NULL DEFAULT 0,
+                ip_allowlist TEXT NOT NULL DEFAULT '[]'
             )
         """)
         await db.execute("""
@@ -176,8 +185,9 @@ async def create_agent_policy(policy: AgentPolicy):
         await db.execute(
             """INSERT OR REPLACE INTO agent_policies
                (agent_id, agent_name, allowed_services, allowed_scopes,
-                rate_limit_per_minute, requires_step_up, created_by, created_at, is_active)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                rate_limit_per_minute, requires_step_up, created_by, created_at, is_active,
+                allowed_hours, allowed_days, expires_at, ip_allowlist)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 policy.agent_id,
                 policy.agent_name,
@@ -188,9 +198,32 @@ async def create_agent_policy(policy: AgentPolicy):
                 policy.created_by,
                 policy.created_at or time.time(),
                 int(policy.is_active),
+                json.dumps(policy.allowed_hours),
+                json.dumps(policy.allowed_days),
+                policy.expires_at,
+                json.dumps(policy.ip_allowlist),
             ),
         )
         await db.commit()
+
+
+def _policy_from_row(row) -> AgentPolicy:
+    """Construct an AgentPolicy from a database row."""
+    return AgentPolicy(
+        agent_id=row["agent_id"],
+        agent_name=row["agent_name"],
+        allowed_services=json.loads(row["allowed_services"]),
+        allowed_scopes=json.loads(row["allowed_scopes"]),
+        rate_limit_per_minute=row["rate_limit_per_minute"],
+        requires_step_up=json.loads(row["requires_step_up"]),
+        created_by=row["created_by"],
+        created_at=row["created_at"],
+        is_active=bool(row["is_active"]),
+        allowed_hours=json.loads(row["allowed_hours"]),
+        allowed_days=json.loads(row["allowed_days"]),
+        expires_at=row["expires_at"],
+        ip_allowlist=json.loads(row["ip_allowlist"]),
+    )
 
 
 async def get_agent_policy(agent_id: str) -> AgentPolicy | None:
@@ -203,17 +236,7 @@ async def get_agent_policy(agent_id: str) -> AgentPolicy | None:
         row = await cursor.fetchone()
         if not row:
             return None
-        return AgentPolicy(
-            agent_id=row["agent_id"],
-            agent_name=row["agent_name"],
-            allowed_services=json.loads(row["allowed_services"]),
-            allowed_scopes=json.loads(row["allowed_scopes"]),
-            rate_limit_per_minute=row["rate_limit_per_minute"],
-            requires_step_up=json.loads(row["requires_step_up"]),
-            created_by=row["created_by"],
-            created_at=row["created_at"],
-            is_active=bool(row["is_active"]),
-        )
+        return _policy_from_row(row)
 
 
 async def get_all_policies(user_id: str) -> list[AgentPolicy]:
@@ -224,20 +247,7 @@ async def get_all_policies(user_id: str) -> list[AgentPolicy]:
             "SELECT * FROM agent_policies WHERE created_by = ?", (user_id,)
         )
         rows = await cursor.fetchall()
-        return [
-            AgentPolicy(
-                agent_id=row["agent_id"],
-                agent_name=row["agent_name"],
-                allowed_services=json.loads(row["allowed_services"]),
-                allowed_scopes=json.loads(row["allowed_scopes"]),
-                rate_limit_per_minute=row["rate_limit_per_minute"],
-                requires_step_up=json.loads(row["requires_step_up"]),
-                created_by=row["created_by"],
-                created_at=row["created_at"],
-                is_active=bool(row["is_active"]),
-            )
-            for row in rows
-        ]
+        return [_policy_from_row(row) for row in rows]
 
 
 async def add_connected_service(user_id: str, service: str, connection_id: str = ""):
@@ -399,3 +409,42 @@ async def toggle_agent_policy(agent_id: str, user_id: str) -> bool | None:
         )
         await db.commit()
         return new_state
+
+
+async def delete_agent_policy(agent_id: str, user_id: str) -> bool:
+    """Permanently delete an agent policy. Returns True if found and deleted."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "DELETE FROM agent_policies WHERE agent_id = ? AND created_by = ?",
+            (agent_id, user_id),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+async def emergency_revoke_all(user_id: str) -> dict:
+    """Emergency kill switch: disable ALL agent policies and revoke ALL API keys for a user.
+
+    Returns counts of affected resources for audit confirmation.
+    """
+    async with aiosqlite.connect(DB_PATH) as db:
+        # Disable all policies
+        cursor = await db.execute(
+            "UPDATE agent_policies SET is_active = 0 WHERE created_by = ?",
+            (user_id,),
+        )
+        policies_disabled = cursor.rowcount
+
+        # Revoke all API keys
+        cursor = await db.execute(
+            "UPDATE api_keys SET is_revoked = 1 WHERE user_id = ? AND is_revoked = 0",
+            (user_id,),
+        )
+        keys_revoked = cursor.rowcount
+
+        await db.commit()
+
+    return {
+        "policies_disabled": policies_disabled,
+        "keys_revoked": keys_revoked,
+    }
