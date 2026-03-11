@@ -36,8 +36,12 @@ AgentGate is built entirely on Auth0 primitives:
 |---------|---------------|
 | Per-agent ACLs | Each agent has a policy defining exactly which services and scopes it can access |
 | Scope enforcement | Token requests are validated against the policy -- excess scopes are rejected |
+| Time-based access | Restrict agents to specific hours/days (UTC) |
+| IP allowlist | CIDR-aware IP filtering (supports IPv4, IPv6, and ranges like 10.0.0.0/24) |
+| Policy expiration | Auto-disable agents after a configurable date |
 | Rate limiting | Per-agent, per-service rate limits (configurable, defaults to 60/min) |
 | Step-up auth | Services can be marked to require CIBA approval before token issuance |
+| Emergency revoke | Kill switch to instantly disable all agent policies and revoke all keys |
 | API key hashing | Keys are SHA-256 hashed at rest. Raw keys shown only once at creation |
 | Token rotation | Token Vault handles automatic refresh and rotation |
 | Audit logging | Every token request, policy change, and connection event is logged |
@@ -56,10 +60,10 @@ AgentGate is built entirely on Auth0 primitives:
 
 - **FastAPI + async throughout**: All database operations and HTTP calls use `async/await`
 - **Clean architecture**: Separate modules for auth, policy engine, database, and configuration
-- **Policy engine**: Five-stage enforcement (existence, active status, service authorization, scope validation, rate limiting)
+- **Policy engine**: Eight-stage enforcement (existence, active status, ownership, expiration, time windows, IP allowlist, service authorization, scope validation, rate limiting)
 - **Dual authentication**: Session-based auth for dashboard users, API key auth (Bearer tokens) for agents
 - **Agent-key binding**: API keys are bound to specific agents -- an agent cannot use another agent's key to request tokens
-- **Test suite**: Comprehensive tests covering policy enforcement, rate limiting, scope intersection, and edge cases
+- **Test suite**: 80 tests covering policy enforcement, CIDR IP validation, time windows, rate limiting, scope intersection, and edge cases
 - **Type safety**: Pydantic models for all API requests, dataclasses for domain objects
 - **Starlette TemplateResponse**: Updated to current API format (no deprecation warnings)
 
@@ -185,9 +189,15 @@ pytest tests/ -v
 - `GET /api/v1/step-up/status/{auth_req_id}` -- Poll step-up status
 
 ### Management Endpoints
-- `POST /api/v1/policies` -- Create an agent policy
+- `POST /api/v1/policies` -- Create an agent policy (with time windows, IP allowlist, expiration)
 - `GET /api/v1/policies` -- List all policies
 - `POST /api/v1/policies/{agent_id}/toggle` -- Enable/disable an agent
+- `DELETE /api/v1/policies/{agent_id}` -- Delete an agent policy
+- `POST /api/v1/emergency-revoke` -- Kill switch: disable all agents and revoke all keys
 - `POST /api/v1/keys` -- Create an API key
 - `GET /api/v1/keys` -- List API keys
 - `DELETE /api/v1/keys/{key_id}` -- Revoke an API key
+
+## Example Integration
+
+See `examples/agent_example.py` for a complete working example of how an AI agent authenticates through AgentGate to access third-party services.
