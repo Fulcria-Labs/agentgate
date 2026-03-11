@@ -1,0 +1,70 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AgentGate - Audit Trail</title>
+    <link rel="stylesheet" href="/static/css/style.css">
+</head>
+<body>
+    <nav class="navbar">
+        <div class="nav-brand"><a href="/">AgentGate</a></div>
+        <div class="nav-user">
+            <span>{{ user.name }}</span>
+            <a href="/logout" class="btn btn-sm">Logout</a>
+        </div>
+    </nav>
+
+    <div class="container">
+        <h2>Audit Trail</h2>
+        <p>Complete log of all agent token requests and service connections.</p>
+
+        <table class="table">
+            <thead>
+                <tr>
+                    <th>Timestamp</th>
+                    <th>Agent</th>
+                    <th>Service</th>
+                    <th>Action</th>
+                    <th>Scopes</th>
+                    <th>Status</th>
+                    <th>IP</th>
+                    <th>Details</th>
+                </tr>
+            </thead>
+            <tbody>
+                {% for entry in audit_entries %}
+                <tr class="audit-row-{{ entry.status }}">
+                    <td><small class="timestamp" data-ts="{{ entry.timestamp }}">{{ entry.timestamp }}</small></td>
+                    <td>{{ entry.agent_id }}</td>
+                    <td>{{ entry.service }}</td>
+                    <td>{{ entry.action }}</td>
+                    <td><small>{{ entry.scopes }}</small></td>
+                    <td>
+                        <span class="badge badge-{{ 'success' if entry.status == 'success' else 'danger' if entry.status in ['denied', 'error'] else 'warning' }}">
+                            {{ entry.status }}
+                        </span>
+                    </td>
+                    <td><small>{{ entry.ip_address }}</small></td>
+                    <td><small>{{ entry.details }}</small></td>
+                </tr>
+                {% endfor %}
+            </tbody>
+        </table>
+
+        {% if not audit_entries %}
+        <p class="empty-state">No audit entries yet.</p>
+        {% endif %}
+    </div>
+
+    <script>
+    document.querySelectorAll('.timestamp[data-ts]').forEach(el => {
+        const ts = parseFloat(el.dataset.ts);
+        if (!isNaN(ts) && ts > 0) {
+            const date = new Date(ts * 1000);
+            el.textContent = date.toLocaleString();
+        }
+    });
+    </script>
+</body>
+</html>
