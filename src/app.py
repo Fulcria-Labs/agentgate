@@ -38,6 +38,7 @@ from .database import (
     validate_api_key,
     AgentPolicy,
 )
+from .analytics import generate_compliance_report, generate_usage_analytics
 from .policy import enforce_policy, requires_step_up, get_effective_scopes, PolicyDenied
 
 
@@ -546,6 +547,39 @@ async def emergency_revoke(request: Request):
         "message": "All agent access has been immediately revoked. "
                    "Re-enable individual agents via policy toggle.",
     }
+
+
+# --- Analytics & Compliance ---
+
+@app.get("/api/v1/analytics")
+async def get_analytics(request: Request, hours: int = 24):
+    """Get token usage analytics and anomaly detection for all agents.
+
+    Returns per-agent usage summaries, risk scores, and detected anomalies.
+    Query param `hours` controls the lookback window (default: 24).
+    """
+    user = require_user(request)
+    if hours < 1:
+        hours = 1
+    if hours > 8760:  # max 1 year
+        hours = 8760
+    return await generate_usage_analytics(user["sub"], hours=hours)
+
+
+@app.get("/api/v1/compliance")
+async def get_compliance_report(request: Request, days: int = 30):
+    """Generate a compliance report suitable for SOC2/GDPR audits.
+
+    Returns access summaries, policy changes, emergency revocations,
+    and anomaly analysis over the specified period.
+    Query param `days` controls the lookback window (default: 30).
+    """
+    user = require_user(request)
+    if days < 1:
+        days = 1
+    if days > 365:
+        days = 365
+    return await generate_compliance_report(user["sub"], period_days=days)
 
 
 # --- Health ---
