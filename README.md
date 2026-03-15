@@ -82,8 +82,8 @@ User ──> Auth0 Login ──> AgentGate Dashboard
 
 ```bash
 # Clone and install
-git clone <repo-url>
-cd auth0-agentgate
+git clone https://github.com/Fulcria-Labs/agentgate.git
+cd agentgate
 pip install -r requirements.txt
 
 # Configure Auth0
