@@ -274,7 +274,8 @@ class TestDetectAnomalies:
         alerts = detect_anomalies("a1", entries)
         esc_alerts = [a for a in alerts if a.alert_type == "scope_escalation"]
         assert len(esc_alerts) == 1
-        assert esc_alerts[0].severity == "high"
+        # 2 attempts = medium severity (graduated: 2-4=medium, 5-9=high, 10+=critical)
+        assert esc_alerts[0].severity == "medium"
 
     def test_no_scope_escalation_without_scope_in_details(self):
         entries = [

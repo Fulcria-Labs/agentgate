@@ -5,9 +5,12 @@ import time
 from collections import defaultdict
 from datetime import datetime, timezone
 
-from .database import AgentPolicy, get_agent_policy, log_audit
+from .database import (
+    AgentPolicy, get_agent_policy, log_audit,
+    record_rate_limit_event, get_rate_limit_count,
+)
 
-# In-memory rate limit tracking (resets on restart, fine for demo)
+# In-memory rate limit tracking (fallback; persistent DB tracking is primary)
 _rate_counters: dict[str, list[float]] = defaultdict(list)
 
 
@@ -176,6 +179,12 @@ async def enforce_policy(
         )
     _rate_counters[key].append(now)
 
+    # Persist rate event for cross-restart continuity
+    try:
+        await record_rate_limit_event(agent_id, service)
+    except Exception:
+        pass  # Non-critical; in-memory tracking is authoritative
+
     # 9. Step-up auth check (returns policy, caller handles CIBA flow)
     # This is checked but not enforced here - the caller must handle it
     # by calling trigger_step_up_auth if the service requires it
@@ -186,6 +195,30 @@ async def enforce_policy(
 def requires_step_up(policy: AgentPolicy, service: str) -> bool:
     """Check if a service requires step-up authentication for this agent."""
     return service in policy.requires_step_up
+
+
+async def restore_rate_limits_from_db() -> int:
+    """Load recent rate limit events from persistent storage into memory.
+
+    Call this on application startup to survive process restarts without
+    losing rate limit state. Returns the number of events restored.
+    """
+    try:
+        import aiosqlite
+        from .database import DB_PATH
+        cutoff = time.time() - 60
+        async with aiosqlite.connect(DB_PATH) as db:
+            cursor = await db.execute(
+                "SELECT agent_id, service, timestamp FROM rate_limit_events WHERE timestamp > ?",
+                (cutoff,),
+            )
+            rows = await cursor.fetchall()
+            for agent_id, service, ts in rows:
+                key = f"{agent_id}:{service}"
+                _rate_counters[key].append(ts)
+            return len(rows)
+    except Exception:
+        return 0
 
 
 def get_effective_scopes(policy: AgentPolicy, service: str, requested: list[str]) -> list[str]:

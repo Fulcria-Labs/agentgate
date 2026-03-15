@@ -8,7 +8,7 @@ from unittest.mock import patch
 
 import pytest
 
-from src.database import AgentPolicy, create_agent_policy, get_audit_log
+from src.database import AgentPolicy, create_agent_policy, get_audit_log, cleanup_rate_limit_events
 from src.policy import (
     PolicyDenied,
     _rate_counters,
@@ -60,6 +60,8 @@ class TestRateCounterManipulation:
         # Simulate all entries aging out
         key = "prune-bot:svc"
         _rate_counters[key] = [t - 120 for t in _rate_counters[key]]
+        # Also clean persistent rate limit events
+        await cleanup_rate_limit_events(max_age_seconds=0)
 
         # Now should succeed again
         result = await enforce_policy("user1", "prune-bot", "svc", ["r"])

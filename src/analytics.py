@@ -234,18 +234,45 @@ def detect_anomalies(
             ))
 
     # --- Scope escalation ---
+    # Detect both direct scope denials and patterns of scope creep
     escalation_entries = [
         e for e in entries
-        if e.status == "denied" and "scope" in e.details.lower()
+        if e.status == "denied" and (
+            "scope" in e.details.lower()
+            or "excess" in e.details.lower()
+            or "not permitted" in e.details.lower()
+        )
     ]
     if escalation_entries:
+        # Escalate severity if repeated attempts (scope creep pattern)
+        count = len(escalation_entries)
+        if count >= 10:
+            severity = "critical"
+        elif count >= 5:
+            severity = "high"
+        else:
+            severity = "medium" if count >= 2 else "low"
+
+        # Extract denied scope names from details
+        denied_scopes = set()
+        for e in escalation_entries:
+            # Parse "Excess scopes: {'admin:org', 'repo'}" patterns
+            if "excess" in e.details.lower() or "scope" in e.details.lower():
+                denied_scopes.add(e.details)
+
         alerts.append(AnomalyAlert(
             alert_type="scope_escalation",
-            severity="high",
+            severity=severity,
             agent_id=agent_id,
-            description=f"{len(escalation_entries)} scope escalation attempt(s)",
+            description=(
+                f"{count} scope escalation attempt(s)"
+                + (f" — possible scope creep" if count >= 5 else "")
+            ),
             timestamp=escalation_entries[0].timestamp,
-            details={"count": len(escalation_entries)},
+            details={
+                "count": count,
+                "pattern": "scope_creep" if count >= 5 else "isolated",
+            },
         ))
 
     return alerts

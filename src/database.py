@@ -118,6 +118,17 @@ async def init_db():
             )
         """)
         await db.execute("""
+            CREATE TABLE IF NOT EXISTS rate_limit_events (
+                agent_id TEXT NOT NULL,
+                service TEXT NOT NULL,
+                timestamp REAL NOT NULL
+            )
+        """)
+        await db.execute("""
+            CREATE INDEX IF NOT EXISTS idx_rate_limit_agent_service
+            ON rate_limit_events(agent_id, service, timestamp DESC)
+        """)
+        await db.execute("""
             CREATE INDEX IF NOT EXISTS idx_audit_user
             ON audit_log(user_id, timestamp DESC)
         """)
@@ -448,3 +459,37 @@ async def emergency_revoke_all(user_id: str) -> dict:
         "policies_disabled": policies_disabled,
         "keys_revoked": keys_revoked,
     }
+
+
+async def record_rate_limit_event(agent_id: str, service: str) -> None:
+    """Record a rate limit event to persistent storage."""
+    async with aiosqlite.connect(DB_PATH) as db:
+        await db.execute(
+            "INSERT INTO rate_limit_events (agent_id, service, timestamp) VALUES (?, ?, ?)",
+            (agent_id, service, time.time()),
+        )
+        await db.commit()
+
+
+async def get_rate_limit_count(agent_id: str, service: str, window_seconds: int = 60) -> int:
+    """Count rate limit events within the given window."""
+    cutoff = time.time() - window_seconds
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM rate_limit_events WHERE agent_id = ? AND service = ? AND timestamp > ?",
+            (agent_id, service, cutoff),
+        )
+        row = await cursor.fetchone()
+        return row[0] if row else 0
+
+
+async def cleanup_rate_limit_events(max_age_seconds: int = 300) -> int:
+    """Remove rate limit events older than max_age_seconds. Returns count removed."""
+    cutoff = time.time() - max_age_seconds
+    async with aiosqlite.connect(DB_PATH) as db:
+        cursor = await db.execute(
+            "DELETE FROM rate_limit_events WHERE timestamp < ?",
+            (cutoff,),
+        )
+        await db.commit()
+        return cursor.rowcount
