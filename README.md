@@ -23,6 +23,8 @@ AgentGate uses Auth0 Token Vault to provide a secure, observable layer between A
 | **Step-Up Auth** | Sensitive operations require additional user confirmation |
 | **Auto-Revocation** | Tokens expire, rotate, and revoke automatically |
 | **Real-Time Dashboard** | See what agents are doing with your credentials right now |
+| **Anomaly Detection** | AI-powered behavioral analysis flags suspicious agent patterns |
+| **Compliance Reports** | SOC2/GDPR-ready audit exports with risk scoring |
 
 ## Architecture
 
@@ -114,6 +116,31 @@ See [AUTH0_SETUP.md](AUTH0_SETUP.md) for detailed instructions.
 - `POST /api/v1/token` - Request a scoped token for a service
 - `GET /api/v1/services` - List available services for this agent
 - `POST /api/v1/step-up` - Trigger step-up auth for sensitive ops
+
+### Analytics & Compliance
+- `GET /api/v1/analytics?hours=24` - Token usage analytics with anomaly detection
+- `GET /api/v1/compliance?days=30` - SOC2/GDPR compliance audit report
+
+## Security Features
+
+### Anomaly Detection
+AgentGate continuously monitors agent behavior and flags suspicious patterns:
+- **Burst Detection** - Alerts when an agent makes unusually many requests in a short window
+- **Off-Hours Access** - Flags access attempts outside configured business hours
+- **High Denial Rate** - Identifies agents whose requests are frequently denied (possible compromise)
+- **New IP Detection** - Alerts when agents start connecting from new IP addresses
+- **Scope Escalation** - Detects attempts to access scopes beyond the agent's policy
+
+### Risk Scoring
+Each agent receives a 0.0-1.0 risk score based on:
+- Denial rate, anomaly severity, IP diversity, and request volume
+- High-risk agents are highlighted in the analytics dashboard
+
+### Compliance Reporting
+Generate audit-ready reports with:
+- Access event summaries, emergency revocations, policy changes
+- Step-up authentication challenge logs
+- Anomaly analysis across all agents
 
 ## Testing
 
