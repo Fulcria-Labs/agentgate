@@ -63,7 +63,7 @@ AgentGate is built entirely on Auth0 primitives:
 - **Policy engine**: Eight-stage enforcement (existence, active status, ownership, expiration, time windows, IP allowlist, service authorization, scope validation, rate limiting)
 - **Dual authentication**: Session-based auth for dashboard users, API key auth (Bearer tokens) for agents
 - **Agent-key binding**: API keys are bound to specific agents -- an agent cannot use another agent's key to request tokens
-- **Test suite**: 80 tests covering policy enforcement, CIDR IP validation, time windows, rate limiting, scope intersection, and edge cases
+- **Test suite**: 1,275 tests across 41 test files covering policy enforcement, CIDR IP validation, time windows, rate limiting, scope intersection, multi-tenant isolation, security injection, API key lifecycle, audit trails, and edge cases
 - **Type safety**: Pydantic models for all API requests, dataclasses for domain objects
 - **Starlette TemplateResponse**: Updated to current API format (no deprecation warnings)
 
