@@ -29,6 +29,9 @@ AgentGate uses Auth0 Token Vault to provide a secure, observable layer between A
 | **Compliance Reports** | SOC2/GDPR-ready audit exports with risk scoring |
 | **Agent Delegation** | Agents can delegate narrowed permissions to sub-agents with depth limits |
 | **Policy Simulation** | Dry-run authorization checks without issuing tokens |
+| **Webhook Notifications** | Real-time alerts for security events (HMAC-signed, auto-retry) |
+| **Policy Templates** | Pre-built security profiles for common use cases |
+| **Usage Quotas** | Daily/monthly token budgets with configurable actions on exceed |
 
 ## Architecture
 
@@ -133,6 +136,31 @@ See [AUTH0_SETUP.md](AUTH0_SETUP.md) for detailed instructions.
 ### Analytics & Compliance
 - `GET /api/v1/analytics?hours=24` - Token usage analytics with anomaly detection
 - `GET /api/v1/compliance?days=30` - SOC2/GDPR compliance audit report
+
+### Webhook Notifications
+- `POST /api/v1/webhooks` - Create a webhook subscription (returns HMAC secret)
+- `GET /api/v1/webhooks` - List webhook subscriptions
+- `GET /api/v1/webhooks/{id}` - Get webhook details
+- `PATCH /api/v1/webhooks/{id}` - Update a webhook
+- `DELETE /api/v1/webhooks/{id}` - Delete a webhook
+- `POST /api/v1/webhooks/{id}/rotate-secret` - Rotate HMAC secret
+- `GET /api/v1/webhooks/{id}/deliveries` - View delivery history
+- `GET /api/v1/webhooks/events/list` - List all available event types
+
+### Policy Templates
+- `GET /api/v1/templates` - List available templates (filter by category, risk, tag)
+- `GET /api/v1/templates/{id}` - Get template details
+- `GET /api/v1/templates/{id}/preview` - Preview policy + risk assessment
+- `GET /api/v1/templates/compare/{a}/{b}` - Compare two templates side by side
+- `POST /api/v1/templates/apply` - Create a policy from a template with overrides
+
+### Usage Quotas
+- `POST /api/v1/quotas` - Create a usage quota (daily/monthly/total)
+- `GET /api/v1/quotas` - List all quotas
+- `GET /api/v1/quotas/check/{agent_id}` - Check quota status
+- `DELETE /api/v1/quotas/{id}` - Delete a quota
+- `POST /api/v1/quotas/{id}/reset` - Reset quota counter
+- `GET /api/v1/quotas/{id}/history` - View usage history
 
 ## Security Features
 

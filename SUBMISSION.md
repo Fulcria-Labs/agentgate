@@ -44,6 +44,9 @@ AgentGate is built entirely on Auth0 primitives:
 | Emergency revoke | Kill switch to instantly disable all agent policies and revoke all keys |
 | Agent delegation | Agents delegate narrowed scopes to sub-agents with depth limits and cascade revocation |
 | Policy simulation | Dry-run authorization checks return detailed pass/fail report without issuing tokens |
+| Webhook notifications | HMAC-signed real-time alerts for 17 security event types with auto-disable on failures |
+| Policy templates | 8 pre-built security profiles (read-only, dev, CI/CD, admin, paranoid) with risk assessment |
+| Usage quotas | Daily/monthly/total token budgets with configurable actions (deny, warn, step-up) |
 | API key hashing | Keys are SHA-256 hashed at rest. Raw keys shown only once at creation |
 | Token rotation | Token Vault handles automatic refresh and rotation |
 | Audit logging | Every token request, policy change, and connection event is logged |
@@ -65,7 +68,7 @@ AgentGate is built entirely on Auth0 primitives:
 - **Policy engine**: Eight-stage enforcement (existence, active status, ownership, expiration, time windows, IP allowlist, service authorization, scope validation, rate limiting)
 - **Dual authentication**: Session-based auth for dashboard users, API key auth (Bearer tokens) for agents
 - **Agent-key binding**: API keys are bound to specific agents -- an agent cannot use another agent's key to request tokens
-- **Test suite**: 1,896 tests across 51 test files covering policy enforcement, CIDR IP validation, time windows, rate limiting, scope intersection, multi-tenant isolation, security injection, API key lifecycle, audit trails, agent delegation chains, policy simulation, and edge cases
+- **Test suite**: 2,333 tests across 61 test files covering policy enforcement, CIDR IP validation, time windows, rate limiting, scope intersection, multi-tenant isolation, security injection, API key lifecycle, audit trails, agent delegation chains, policy simulation, webhook notifications, policy templates, usage quotas, and edge cases
 - **Type safety**: Pydantic models for all API requests, dataclasses for domain objects
 - **Starlette TemplateResponse**: Updated to current API format (no deprecation warnings)
 
@@ -101,6 +104,9 @@ Auth0's Token Vault, CIBA, and Connected Accounts already provide the building b
 - Policy engine = the missing layer that maps agent identity to permitted actions
 - Delegation chains = safe agent-to-agent permission sharing with scope narrowing at every hop
 - Policy simulation = debuggable authorization without side effects
+- Webhook notifications = real-time incident response for security teams
+- Policy templates = security best practices encoded as reusable profiles
+- Usage quotas = budget-based access control for cost and risk management
 
 ## Architecture
 

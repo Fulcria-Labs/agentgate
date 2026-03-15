@@ -71,6 +71,36 @@ from .capability import (
     compute_capability_diff,
     discover_capabilities,
 )
+from .webhooks import (
+    WebhookEvent,
+    create_webhook,
+    delete_webhook,
+    dispatch_webhook,
+    get_webhook,
+    get_webhook_deliveries,
+    init_webhook_tables,
+    list_webhooks,
+    record_delivery_result,
+    rotate_webhook_secret,
+    update_webhook,
+)
+from .templates import (
+    apply_template,
+    compare_templates,
+    get_template,
+    list_templates,
+    preview_template,
+)
+from .quotas import (
+    check_quota,
+    create_quota,
+    delete_quota,
+    get_quota_usage_history,
+    get_quotas,
+    init_quota_tables,
+    record_quota_usage,
+    reset_quota,
+)
 
 
 @asynccontextmanager
@@ -78,6 +108,8 @@ async def lifespan(app: FastAPI):
     await init_db()
     await init_delegation_tables()
     await init_consent_tables()
+    await init_webhook_tables()
+    await init_quota_tables()
     yield
 
 
@@ -1020,6 +1052,351 @@ async def check_agent_capability(
         user_id=user["sub"],
         ip_address=ip,
     )
+
+
+# --- Webhook Management ---
+
+class CreateWebhookRequest(BaseModel):
+    url: str
+    events: list[str]
+    description: str = ""
+
+
+class UpdateWebhookRequest(BaseModel):
+    url: str | None = None
+    events: list[str] | None = None
+    is_active: bool | None = None
+    description: str | None = None
+
+
+@app.post("/api/v1/webhooks")
+async def create_webhook_endpoint(body: CreateWebhookRequest, request: Request):
+    """Create a webhook subscription for security events.
+
+    Subscribe to events like policy.violated, anomaly.detected,
+    emergency.revoke, step_up.triggered, and more.
+    Returns the webhook secret (only shown once) for HMAC signature verification.
+    """
+    user = require_user(request)
+    try:
+        sub = await create_webhook(
+            user_id=user["sub"],
+            url=body.url,
+            events=body.events,
+            description=body.description,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "webhook_id": sub.id,
+        "url": sub.url,
+        "events": sub.events,
+        "secret": sub.secret,
+        "warning": "Save this secret now. It cannot be retrieved again.",
+    }
+
+
+@app.get("/api/v1/webhooks")
+async def list_webhooks_endpoint(request: Request):
+    """List all webhook subscriptions (secrets are masked)."""
+    user = require_user(request)
+    subs = await list_webhooks(user["sub"])
+    return [
+        {
+            "webhook_id": s.id,
+            "url": s.url,
+            "events": s.events,
+            "is_active": s.is_active,
+            "description": s.description,
+            "failure_count": s.failure_count,
+            "last_triggered_at": s.last_triggered_at or None,
+            "last_status_code": s.last_status_code or None,
+            "created_at": s.created_at,
+        }
+        for s in subs
+    ]
+
+
+@app.get("/api/v1/webhooks/{webhook_id}")
+async def get_webhook_endpoint(webhook_id: str, request: Request):
+    """Get details for a specific webhook subscription."""
+    user = require_user(request)
+    sub = await get_webhook(webhook_id, user["sub"])
+    if not sub:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    return {
+        "webhook_id": sub.id,
+        "url": sub.url,
+        "events": sub.events,
+        "is_active": sub.is_active,
+        "description": sub.description,
+        "failure_count": sub.failure_count,
+        "last_triggered_at": sub.last_triggered_at or None,
+        "created_at": sub.created_at,
+    }
+
+
+@app.patch("/api/v1/webhooks/{webhook_id}")
+async def update_webhook_endpoint(
+    webhook_id: str, body: UpdateWebhookRequest, request: Request,
+):
+    """Update a webhook subscription's URL, events, or active status."""
+    user = require_user(request)
+    try:
+        sub = await update_webhook(
+            webhook_id, user["sub"],
+            url=body.url, events=body.events,
+            is_active=body.is_active, description=body.description,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not sub:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    return {"webhook_id": sub.id, "status": "updated"}
+
+
+@app.delete("/api/v1/webhooks/{webhook_id}")
+async def delete_webhook_endpoint(webhook_id: str, request: Request):
+    """Delete a webhook subscription."""
+    user = require_user(request)
+    deleted = await delete_webhook(webhook_id, user["sub"])
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    return {"status": "deleted", "webhook_id": webhook_id}
+
+
+@app.post("/api/v1/webhooks/{webhook_id}/rotate-secret")
+async def rotate_secret_endpoint(webhook_id: str, request: Request):
+    """Rotate the HMAC secret for a webhook. Returns the new secret (shown once)."""
+    user = require_user(request)
+    new_secret = await rotate_webhook_secret(webhook_id, user["sub"])
+    if not new_secret:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    return {
+        "webhook_id": webhook_id,
+        "secret": new_secret,
+        "warning": "Save this secret now. It cannot be retrieved again.",
+    }
+
+
+@app.get("/api/v1/webhooks/{webhook_id}/deliveries")
+async def get_deliveries_endpoint(
+    webhook_id: str, request: Request, limit: int = 50,
+):
+    """Get recent delivery attempts for a webhook subscription."""
+    user = require_user(request)
+    deliveries = await get_webhook_deliveries(webhook_id, user["sub"], limit=min(limit, 200))
+    return [
+        {
+            "delivery_id": d.id,
+            "event": d.event,
+            "status_code": d.status_code,
+            "success": d.success,
+            "delivered_at": d.delivered_at,
+            "duration_ms": d.duration_ms,
+        }
+        for d in deliveries
+    ]
+
+
+@app.get("/api/v1/webhooks/events/list")
+async def list_webhook_events(request: Request):
+    """List all available webhook event types."""
+    require_user(request)
+    return [{"event": e.value, "name": e.name} for e in WebhookEvent]
+
+
+# --- Policy Templates ---
+
+@app.get("/api/v1/templates")
+async def list_templates_endpoint(
+    request: Request,
+    category: str = "",
+    risk_level: str = "",
+    tag: str = "",
+):
+    """List available policy templates with optional filters.
+
+    Templates are pre-built security profiles encoding best practices
+    for common use cases (read-only, dev-standard, ci-cd, admin, etc.).
+    """
+    require_user(request)
+    templates = list_templates(category=category, risk_level=risk_level, tag=tag)
+    return [t.to_dict() for t in templates]
+
+
+@app.get("/api/v1/templates/{template_id}")
+async def get_template_endpoint(template_id: str, request: Request):
+    """Get details for a specific policy template."""
+    require_user(request)
+    template = get_template(template_id)
+    if not template:
+        raise HTTPException(status_code=404, detail="Template not found")
+    return template.to_dict()
+
+
+@app.get("/api/v1/templates/{template_id}/preview")
+async def preview_template_endpoint(template_id: str, request: Request):
+    """Preview what a policy would look like if created from this template.
+
+    Returns the template details plus a risk assessment and policy preview
+    without creating anything.
+    """
+    require_user(request)
+    preview = preview_template(template_id)
+    if not preview:
+        raise HTTPException(status_code=404, detail="Template not found")
+    return preview
+
+
+@app.get("/api/v1/templates/compare/{id_a}/{id_b}")
+async def compare_templates_endpoint(id_a: str, id_b: str, request: Request):
+    """Compare two policy templates side by side.
+
+    Returns differences in permissions, restrictions, and risk levels.
+    """
+    require_user(request)
+    comparison = compare_templates(id_a, id_b)
+    if not comparison:
+        raise HTTPException(status_code=404, detail="One or both templates not found")
+    return comparison
+
+
+class ApplyTemplateRequest(BaseModel):
+    template_id: str
+    agent_id: str
+    agent_name: str
+    overrides: dict = {}
+
+
+@app.post("/api/v1/templates/apply")
+async def apply_template_endpoint(body: ApplyTemplateRequest, request: Request):
+    """Create an agent policy from a template with optional overrides.
+
+    This creates the policy in the database, ready for immediate use.
+    Overrides let you customize specific fields while keeping template defaults.
+    """
+    user = require_user(request)
+    policy = apply_template(
+        template_id=body.template_id,
+        agent_id=body.agent_id,
+        agent_name=body.agent_name,
+        user_id=user["sub"],
+        overrides=body.overrides or None,
+    )
+    if not policy:
+        raise HTTPException(status_code=404, detail="Template not found")
+
+    await create_agent_policy(policy)
+    await log_audit(
+        user["sub"], body.agent_id, "", "policy_created_from_template", "success",
+        details=f"Template: {body.template_id}",
+    )
+    return {
+        "status": "created",
+        "agent_id": body.agent_id,
+        "template_id": body.template_id,
+        "expires_at": policy.expires_at or None,
+    }
+
+
+# --- Token Usage Quotas ---
+
+class CreateQuotaRequest(BaseModel):
+    agent_id: str
+    quota_type: str = "daily"  # "daily", "monthly", "total"
+    max_tokens: int = 100
+    action_on_exceed: str = "deny"  # "deny", "warn", "step_up"
+    notify_at_percent: int = 80
+
+
+@app.post("/api/v1/quotas")
+async def create_quota_endpoint(body: CreateQuotaRequest, request: Request):
+    """Create a usage quota for an agent.
+
+    Quotas provide budget-based access control on top of rate limiting.
+    Types: daily (resets at midnight UTC), monthly (resets on 1st), total (never resets).
+    Actions on exceed: deny (block), warn (allow + flag), step_up (require approval).
+    """
+    user = require_user(request)
+    try:
+        quota = await create_quota(
+            user_id=user["sub"],
+            agent_id=body.agent_id,
+            quota_type=body.quota_type,
+            max_tokens=body.max_tokens,
+            action_on_exceed=body.action_on_exceed,
+            notify_at_percent=body.notify_at_percent,
+        )
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "quota_id": quota.id,
+        "agent_id": quota.agent_id,
+        "quota_type": quota.quota_type,
+        "max_tokens": quota.max_tokens,
+        "action_on_exceed": quota.action_on_exceed,
+    }
+
+
+@app.get("/api/v1/quotas")
+async def list_quotas_endpoint(request: Request, agent_id: str = ""):
+    """List all usage quotas, optionally filtered by agent_id."""
+    user = require_user(request)
+    quotas = await get_quotas(user["sub"], agent_id=agent_id)
+    return [
+        {
+            "quota_id": q.id,
+            "agent_id": q.agent_id,
+            "quota_type": q.quota_type,
+            "max_tokens": q.max_tokens,
+            "current_usage": q.current_usage,
+            "is_active": q.is_active,
+            "action_on_exceed": q.action_on_exceed,
+            "notify_at_percent": q.notify_at_percent,
+        }
+        for q in quotas
+    ]
+
+
+@app.get("/api/v1/quotas/check/{agent_id}")
+async def check_quota_endpoint(agent_id: str, request: Request):
+    """Check current quota status for an agent.
+
+    Returns usage, remaining budget, and whether thresholds are reached.
+    Automatically resets period-based quotas when the period has elapsed.
+    """
+    user = require_user(request)
+    statuses = await check_quota(user["sub"], agent_id)
+    return [s.to_dict() for s in statuses]
+
+
+@app.delete("/api/v1/quotas/{quota_id}")
+async def delete_quota_endpoint(quota_id: str, request: Request):
+    """Delete a usage quota."""
+    user = require_user(request)
+    deleted = await delete_quota(quota_id, user["sub"])
+    if not deleted:
+        raise HTTPException(status_code=404, detail="Quota not found")
+    return {"status": "deleted", "quota_id": quota_id}
+
+
+@app.post("/api/v1/quotas/{quota_id}/reset")
+async def reset_quota_endpoint(quota_id: str, request: Request):
+    """Manually reset a quota's usage counter to zero."""
+    user = require_user(request)
+    reset = await reset_quota(quota_id, user["sub"])
+    if not reset:
+        raise HTTPException(status_code=404, detail="Quota not found")
+    return {"status": "reset", "quota_id": quota_id}
+
+
+@app.get("/api/v1/quotas/{quota_id}/history")
+async def quota_history_endpoint(quota_id: str, request: Request, limit: int = 100):
+    """Get usage history for a specific quota."""
+    require_user(request)
+    history = await get_quota_usage_history(quota_id, limit=min(limit, 500))
+    return history
 
 
 # --- Health ---
