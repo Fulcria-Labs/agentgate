@@ -49,12 +49,35 @@ from .delegation import (
 )
 from .policy import enforce_policy, requires_step_up, get_effective_scopes, PolicyDenied
 from .simulation import simulate_token_request
+from .consent import (
+    ConsentError,
+    approve_consent,
+    check_consent,
+    create_consent_grant,
+    create_consent_request,
+    deny_consent,
+    get_consent_audit_log,
+    get_consent_summary,
+    init_consent_tables,
+    list_consent_grants,
+    list_consent_requests,
+    resolve_consent_request,
+    revoke_all_agent_consent,
+    revoke_consent,
+    use_consent,
+)
+from .capability import (
+    check_capability,
+    compute_capability_diff,
+    discover_capabilities,
+)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
     await init_delegation_tables()
+    await init_consent_tables()
     yield
 
 
@@ -679,6 +702,324 @@ async def simulate_request(body: SimulateRequest, request: Request):
         ip_address=body.ip_address or (request.client.host if request.client else ""),
     )
     return result.to_dict()
+
+
+# --- Consent Management ---
+
+class CreateConsentGrantRequest(BaseModel):
+    agent_id: str
+    service: str
+    scope_type: str = "service"
+    action_pattern: str = "*"
+    resource_pattern: str = "*"
+    conditions: dict = {}
+    max_uses: int = 0
+    expires_at: float = 0.0
+    auto_approve: bool = False
+    metadata: dict = {}
+
+
+@app.post("/api/v1/consent/grants")
+async def create_consent(body: CreateConsentGrantRequest, request: Request):
+    """Create a consent grant for an agent.
+
+    Defines what actions an agent is permitted to perform on the user's behalf.
+    Supports granular scope types: blanket, service, action, resource, one_time.
+    """
+    user = require_user(request)
+    try:
+        grant = await create_consent_grant(
+            user_id=user["sub"],
+            agent_id=body.agent_id,
+            service=body.service,
+            scope_type=body.scope_type,
+            action_pattern=body.action_pattern,
+            resource_pattern=body.resource_pattern,
+            conditions=body.conditions,
+            max_uses=body.max_uses,
+            expires_at=body.expires_at,
+            auto_approve=body.auto_approve,
+            metadata=body.metadata,
+        )
+    except ConsentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "grant_id": grant.id,
+        "status": grant.status,
+        "agent_id": grant.agent_id,
+        "service": grant.service,
+        "scope_type": grant.scope_type,
+    }
+
+
+@app.get("/api/v1/consent/grants")
+async def get_consent_grants(
+    request: Request,
+    agent_id: str = "",
+    service: str = "",
+    status: str = "",
+    include_expired: bool = False,
+):
+    """List consent grants for the current user with optional filters."""
+    user = require_user(request)
+    grants = await list_consent_grants(
+        user["sub"],
+        agent_id=agent_id,
+        service=service,
+        status=status,
+        include_expired=include_expired,
+    )
+    return [
+        {
+            "grant_id": g.id,
+            "agent_id": g.agent_id,
+            "service": g.service,
+            "scope_type": g.scope_type,
+            "action_pattern": g.action_pattern,
+            "resource_pattern": g.resource_pattern,
+            "status": g.status,
+            "max_uses": g.max_uses,
+            "current_uses": g.current_uses,
+            "created_at": g.created_at,
+            "expires_at": g.expires_at or None,
+        }
+        for g in grants
+    ]
+
+
+@app.post("/api/v1/consent/grants/{grant_id}/approve")
+async def approve_consent_grant(grant_id: str, request: Request):
+    """Approve a pending consent grant."""
+    user = require_user(request)
+    try:
+        grant = await approve_consent(grant_id, user["sub"])
+    except ConsentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not grant:
+        raise HTTPException(status_code=404, detail="Grant not found")
+    return {"grant_id": grant.id, "status": grant.status}
+
+
+@app.post("/api/v1/consent/grants/{grant_id}/deny")
+async def deny_consent_grant(grant_id: str, request: Request):
+    """Deny a pending consent grant."""
+    user = require_user(request)
+    try:
+        grant = await deny_consent(grant_id, user["sub"])
+    except ConsentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not grant:
+        raise HTTPException(status_code=404, detail="Grant not found")
+    return {"grant_id": grant.id, "status": grant.status}
+
+
+@app.delete("/api/v1/consent/grants/{grant_id}")
+async def revoke_consent_grant(grant_id: str, request: Request):
+    """Revoke an active consent grant."""
+    user = require_user(request)
+    try:
+        grant = await revoke_consent(grant_id, user["sub"])
+    except ConsentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not grant:
+        raise HTTPException(status_code=404, detail="Grant not found")
+    return {"grant_id": grant.id, "status": "revoked"}
+
+
+@app.post("/api/v1/consent/grants/{grant_id}/use")
+async def record_consent_use(grant_id: str, request: Request):
+    """Record a usage of a consent grant."""
+    require_user(request)
+    success = await use_consent(grant_id)
+    if not success:
+        raise HTTPException(status_code=403, detail="Consent exhausted or not found")
+    return {"grant_id": grant_id, "status": "used"}
+
+
+@app.get("/api/v1/consent/check")
+async def check_agent_consent(
+    agent_id: str, service: str,
+    action: str = "", resource: str = "",
+    request: Request = None,
+):
+    """Check if an agent has consent for a specific operation."""
+    user = require_user(request)
+    has_consent, grant = await check_consent(
+        user["sub"], agent_id, service, action, resource,
+    )
+    return {
+        "has_consent": has_consent,
+        "grant_id": grant.id if grant else None,
+        "scope_type": grant.scope_type if grant else None,
+    }
+
+
+class CreateConsentRequestBody(BaseModel):
+    agent_id: str
+    service: str
+    action: str = ""
+    resource: str = ""
+    reason: str = ""
+    urgency: str = "normal"
+
+
+@app.post("/api/v1/consent/requests")
+async def create_consent_req(body: CreateConsentRequestBody, request: Request):
+    """Create a consent request from an agent to the user."""
+    user = require_user(request)
+    try:
+        req = await create_consent_request(
+            user_id=user["sub"],
+            agent_id=body.agent_id,
+            service=body.service,
+            action=body.action,
+            resource=body.resource,
+            reason=body.reason,
+            urgency=body.urgency,
+        )
+    except ConsentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return {
+        "request_id": req.id,
+        "status": req.status,
+        "urgency": req.urgency,
+    }
+
+
+@app.get("/api/v1/consent/requests")
+async def get_consent_requests(
+    request: Request,
+    status: str = "",
+    agent_id: str = "",
+):
+    """List consent requests for the current user."""
+    user = require_user(request)
+    requests = await list_consent_requests(user["sub"], status=status, agent_id=agent_id)
+    return [
+        {
+            "request_id": r.id,
+            "agent_id": r.agent_id,
+            "service": r.service,
+            "action": r.action,
+            "resource": r.resource,
+            "reason": r.reason,
+            "urgency": r.urgency,
+            "status": r.status,
+            "created_at": r.created_at,
+        }
+        for r in requests
+    ]
+
+
+class ResolveConsentRequestBody(BaseModel):
+    approved: bool
+    scope_type: str = "action"
+    max_uses: int = 0
+    expires_at: float = 0.0
+
+
+@app.post("/api/v1/consent/requests/{request_id}/resolve")
+async def resolve_consent_req(
+    request_id: str,
+    body: ResolveConsentRequestBody,
+    request: Request,
+):
+    """Approve or deny a consent request."""
+    user = require_user(request)
+    try:
+        req, grant = await resolve_consent_request(
+            request_id, user["sub"], body.approved,
+            grant_options={
+                "scope_type": body.scope_type,
+                "max_uses": body.max_uses,
+                "expires_at": body.expires_at,
+            } if body.approved else None,
+        )
+    except ConsentError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    if not req:
+        raise HTTPException(status_code=404, detail="Request not found")
+    return {
+        "request_id": req.id,
+        "status": req.status,
+        "grant_id": grant.id if grant else None,
+    }
+
+
+@app.delete("/api/v1/consent/agents/{agent_id}")
+async def revoke_all_consent_for_agent(agent_id: str, request: Request):
+    """Revoke all consent grants for a specific agent."""
+    user = require_user(request)
+    count = await revoke_all_agent_consent(user["sub"], agent_id)
+    return {"agent_id": agent_id, "revoked_count": count}
+
+
+@app.get("/api/v1/consent/summary")
+async def consent_summary(request: Request):
+    """Get a summary of consent grants and pending requests."""
+    user = require_user(request)
+    return await get_consent_summary(user["sub"])
+
+
+@app.get("/api/v1/consent/audit")
+async def consent_audit(request: Request, limit: int = 100):
+    """Get consent audit log."""
+    user = require_user(request)
+    entries = await get_consent_audit_log(user["sub"], limit=min(limit, 500))
+    return [
+        {
+            "timestamp": e.timestamp,
+            "agent_id": e.agent_id,
+            "consent_id": e.consent_id,
+            "action": e.action,
+            "details": e.details,
+        }
+        for e in entries
+    ]
+
+
+# --- Agent Capability Discovery ---
+
+@app.get("/api/v1/capabilities/{agent_id}")
+async def get_capabilities(agent_id: str, request: Request):
+    """Discover the full capability manifest for an agent.
+
+    Returns what services, scopes, rate limits, and constraints
+    apply to this agent. Agents should call this before making
+    token requests to understand their authorization boundaries.
+    """
+    user = require_user(request)
+    ip = request.client.host if request.client else ""
+    manifest = await discover_capabilities(
+        agent_id=agent_id,
+        user_id=user["sub"],
+        ip_address=ip,
+    )
+    return manifest.to_dict()
+
+
+@app.get("/api/v1/capabilities/{agent_id}/check")
+async def check_agent_capability(
+    agent_id: str,
+    service: str,
+    request: Request,
+    scopes: str = "",
+):
+    """Quick pre-flight check if an agent can access a specific service.
+
+    Returns a simple pass/fail with reasons. Lighter weight than
+    the full capability manifest.
+    """
+    user = require_user(request)
+    ip = request.client.host if request.client else ""
+    scope_list = [s.strip() for s in scopes.split(",") if s.strip()] if scopes else None
+    return await check_capability(
+        agent_id=agent_id,
+        service=service,
+        scopes=scope_list,
+        user_id=user["sub"],
+        ip_address=ip,
+    )
 
 
 # --- Health ---
