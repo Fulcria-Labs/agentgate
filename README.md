@@ -1,5 +1,7 @@
 # AgentGate - Secure AI Agent Gateway with Auth0 Token Vault
 
+[![CI](https://github.com/Fulcria-Labs/agentgate/actions/workflows/ci.yml/badge.svg)](https://github.com/Fulcria-Labs/agentgate/actions/workflows/ci.yml)
+
 A security-first gateway that manages how AI agents access third-party services on behalf of users, powered by Auth0 Token Vault.
 
 **Every token request is scoped, logged, and revocable.**
