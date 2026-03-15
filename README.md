@@ -25,6 +25,8 @@ AgentGate uses Auth0 Token Vault to provide a secure, observable layer between A
 | **Real-Time Dashboard** | See what agents are doing with your credentials right now |
 | **Anomaly Detection** | AI-powered behavioral analysis flags suspicious agent patterns |
 | **Compliance Reports** | SOC2/GDPR-ready audit exports with risk scoring |
+| **Agent Delegation** | Agents can delegate narrowed permissions to sub-agents with depth limits |
+| **Policy Simulation** | Dry-run authorization checks without issuing tokens |
 
 ## Architecture
 
@@ -116,6 +118,15 @@ See [AUTH0_SETUP.md](AUTH0_SETUP.md) for detailed instructions.
 - `POST /api/v1/token` - Request a scoped token for a service
 - `GET /api/v1/services` - List available services for this agent
 - `POST /api/v1/step-up` - Trigger step-up auth for sensitive ops
+
+### Delegation Endpoints
+- `POST /api/v1/delegate` - Create a delegation from parent to child agent
+- `GET /api/v1/delegations` - List all delegations
+- `GET /api/v1/delegations/{child_agent_id}/permissions` - Get effective delegated permissions
+- `DELETE /api/v1/delegations/{delegation_id}` - Revoke a delegation (cascades)
+
+### Policy Simulation
+- `POST /api/v1/simulate` - Dry-run a token request and get a detailed policy check report
 
 ### Analytics & Compliance
 - `GET /api/v1/analytics?hours=24` - Token usage analytics with anomaly detection

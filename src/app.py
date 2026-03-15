@@ -39,12 +39,22 @@ from .database import (
     AgentPolicy,
 )
 from .analytics import generate_compliance_report, generate_usage_analytics
+from .delegation import (
+    create_delegation,
+    DelegationError,
+    get_delegated_permissions,
+    init_delegation_tables,
+    list_delegations,
+    revoke_delegation,
+)
 from .policy import enforce_policy, requires_step_up, get_effective_scopes, PolicyDenied
+from .simulation import simulate_token_request
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    await init_delegation_tables()
     yield
 
 
@@ -580,6 +590,95 @@ async def get_compliance_report(request: Request, days: int = 30):
     if days > 365:
         days = 365
     return await generate_compliance_report(user["sub"], period_days=days)
+
+
+# --- Agent Delegation ---
+
+class CreateDelegationRequest(BaseModel):
+    parent_agent_id: str
+    child_agent_id: str
+    services: list[str]
+    scopes: dict[str, list[str]]
+    expires_at: float = 0.0
+    max_depth: int = 3
+
+
+@app.post("/api/v1/delegate")
+async def delegate_access(body: CreateDelegationRequest, request: Request):
+    """Create a delegation from a parent agent to a child agent.
+
+    The child agent receives a narrowed subset of the parent's permissions.
+    Delegation chains are limited to a configurable depth (default 3).
+    Scopes must be a subset of the parent's allowed scopes.
+    """
+    user = require_user(request)
+    try:
+        result = await create_delegation(
+            user_id=user["sub"],
+            parent_agent_id=body.parent_agent_id,
+            child_agent_id=body.child_agent_id,
+            services=body.services,
+            scopes=body.scopes,
+            expires_at=body.expires_at,
+            max_depth=body.max_depth,
+        )
+    except DelegationError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    return result
+
+
+@app.get("/api/v1/delegations")
+async def get_delegations(request: Request):
+    """List all delegations created by the current user."""
+    user = require_user(request)
+    return await list_delegations(user["sub"])
+
+
+@app.get("/api/v1/delegations/{child_agent_id}/permissions")
+async def get_delegation_permissions(child_agent_id: str, request: Request):
+    """Get effective permissions for a child agent via delegation chain."""
+    require_user(request)
+    perms = await get_delegated_permissions(child_agent_id)
+    if not perms:
+        raise HTTPException(status_code=404, detail="No active delegation found")
+    return perms
+
+
+@app.delete("/api/v1/delegations/{delegation_id}")
+async def delete_delegation(delegation_id: str, request: Request):
+    """Revoke a delegation. Cascades to all child delegations."""
+    user = require_user(request)
+    revoked = await revoke_delegation(delegation_id, user["sub"])
+    if not revoked:
+        raise HTTPException(status_code=404, detail="Delegation not found")
+    return {"status": "revoked", "delegation_id": delegation_id}
+
+
+# --- Policy Simulation ---
+
+class SimulateRequest(BaseModel):
+    agent_id: str
+    service: str
+    scopes: list[str] = []
+    ip_address: str = ""
+
+
+@app.post("/api/v1/simulate")
+async def simulate_request(body: SimulateRequest, request: Request):
+    """Simulate a token request without issuing a token.
+
+    Returns a detailed report of which policy checks would pass or fail.
+    Useful for debugging agent configurations and testing policies.
+    """
+    user = require_user(request)
+    result = await simulate_token_request(
+        user_id=user["sub"],
+        agent_id=body.agent_id,
+        service=body.service,
+        requested_scopes=body.scopes,
+        ip_address=body.ip_address or (request.client.host if request.client else ""),
+    )
+    return result.to_dict()
 
 
 # --- Health ---
